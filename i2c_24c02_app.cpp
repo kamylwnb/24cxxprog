@@ -2,6 +2,7 @@
 #include "furi_hal.h"
 #include <gui/gui.h>
 #include <gui/canvas.h>
+#include <gui/view.h>
 #include <gui/elements.h>
 #include <furi_hal_i2c.h>
 #include <furi_hal.h>
@@ -36,8 +37,10 @@ typedef enum {
     AppState_ConfirmLoad,
     AppState_SaveFile,
     AppState_Delete,
+    AppState_ConfirmDelete,
     AppState_Erase,
     AppState_Settings,
+    AppState_I2CScanner,
     AppState_About,
 } AppState;
 
@@ -46,7 +49,6 @@ typedef enum {
     MainItem_Read,
     MainItem_Write,
     MainItem_LoadFile,
-    MainItem_SaveFile,
     MainItem_Delete,
     MainItem_Erase,
     MainItem_Settings,
@@ -74,6 +76,7 @@ typedef enum {
     SettingsItem_Address,
     SettingsItem_ViewMode,
     SettingsItem_ChipType,
+    SettingsItem_I2CScanner,
     SettingsItem_Count
 } SettingsItem;
 
@@ -137,6 +140,20 @@ typedef struct {
     uint8_t read_current_addr;
     uint32_t read_last_update;
     uint8_t read_total_bytes;
+    bool read_completed; // Flag to indicate read operation finished
+
+    // Async write operation (for loading files to EEPROM)
+    bool writing;
+    uint8_t write_current_addr_async;
+    uint32_t write_last_update;
+    uint8_t write_total_bytes_async;
+
+    // Async verify operation (after write)
+    bool verifying;
+    uint8_t verify_current_addr;
+    uint32_t verify_last_update;
+    uint8_t verify_total_bytes;
+    uint8_t verify_buffer[256];
 
     // File operations
     char file_path[256];
@@ -146,6 +163,9 @@ typedef struct {
 
     // Load confirmation dialog
     bool confirm_load_yes; // For Yes/No selection in confirmation dialog
+
+    // Delete confirmation dialog
+    bool confirm_delete_yes; // For Yes/No selection in delete confirmation
 
     // Save to file operations
     bool save_mode;
@@ -161,6 +181,12 @@ typedef struct {
     char filename_input[32];
     bool inputting_filename;
     uint8_t filename_cursor;
+    size_t scroll_counter; // For animated text scrolling
+
+    // I2C Scanner
+    bool i2c_devices[128]; // Found devices on I2C bus
+    uint8_t i2c_device_count;
+    bool scanning_i2c;
 
     bool running;
     bool dark_mode;
@@ -174,6 +200,7 @@ static void draw_load_file_screen(Canvas* canvas, EEPROMApp* app);
 static void draw_save_file_screen(Canvas* canvas, EEPROMApp* app);
 static void draw_erase_screen(Canvas* canvas, EEPROMApp* app);
 static void draw_settings_screen(Canvas* canvas, EEPROMApp* app);
+static void draw_i2c_scanner_screen(Canvas* canvas, EEPROMApp* app);
 static void draw_about_screen(Canvas* canvas, EEPROMApp* app);
 static void eeprom_draw_callback(Canvas* canvas, void* context);
 static void eeprom_input_callback(InputEvent* input_event, void* context);
@@ -193,16 +220,19 @@ static bool write_memory_data(EEPROMApp* app);
 static void ensure_app_directory(EEPROMApp* app);
 static void process_erase_step(EEPROMApp* app);
 static void process_read_step(EEPROMApp* app);
+static void process_write_step(EEPROMApp* app);
+static void scan_i2c_bus(EEPROMApp* app);
 
 // New function for confirmation dialog
 static void draw_confirm_load_screen(Canvas* canvas, EEPROMApp* app);
+static void draw_confirm_delete_screen(Canvas* canvas, EEPROMApp* app);
 
 // Main screen drawing
 static void draw_main_screen(Canvas* canvas, EEPROMApp* app) {
     canvas_clear(canvas);
 
     const char* menu_items[] = {
-        "Read", "Write", "Load File", "Save File", "Delete", "Erase", "Settings", "About"};
+        "Read", "Write", "Load File", "Delete", "Erase", "Settings", "About"};
 
     size_t position = app->main_cursor;
 
@@ -310,7 +340,11 @@ static void draw_read_screen(Canvas* canvas, EEPROMApp* app) {
 
     // Buttons
     elements_button_left(canvas, "Back");
-    elements_button_center(canvas, "Read");
+    if(app->read_completed) {
+        elements_button_center(canvas, "Save");
+    } else {
+        elements_button_center(canvas, "Read");
+    }
 }
 
 // Write screen drawing
@@ -406,16 +440,29 @@ static void draw_load_file_screen(Canvas* canvas, EEPROMApp* app) {
             else
                 filename = app->file_list[file_idx];
 
+            // Create FuriString for scrollable text
+            FuriString* filename_str = furi_string_alloc();
+            furi_string_set_str(filename_str, filename);
+
             if(app->file_cursor == file_idx) {
                 // Selected: inverted
                 canvas_draw_box(canvas, 0, y - 3, 118, 11);
                 canvas_set_color(canvas, ColorWhite);
-                canvas_draw_str(canvas, 2, y + 5, filename);
+                elements_scrollable_text_line(
+                    canvas,
+                    2,
+                    y + 5,
+                    112,
+                    filename_str,
+                    app->scroll_counter / 5, // Slower scroll speed
+                    false);
                 canvas_set_color(canvas, ColorBlack);
             } else {
                 // Normal
-                canvas_draw_str(canvas, 2, y + 5, filename);
+                elements_scrollable_text_line(canvas, 2, y + 5, 112, filename_str, 0, true);
             }
+
+            furi_string_free(filename_str);
         }
     } else {
         // Show file path or instructions
@@ -457,7 +504,9 @@ static void draw_save_file_screen(Canvas* canvas, EEPROMApp* app) {
     // Show sample filename
     char sample_filename[64];
     generate_filename(app, sample_filename, sizeof(sample_filename));
-    canvas_draw_str_aligned(canvas, 64, 34, AlignCenter, AlignTop, sample_filename);
+    char sample_full[70];
+    snprintf(sample_full, sizeof(sample_full), "%s.bin", sample_filename);
+    canvas_draw_str_aligned(canvas, 64, 34, AlignCenter, AlignTop, sample_full);
 
     // Buttons
     elements_button_left(canvas, "Wroc");
@@ -530,7 +579,7 @@ static void draw_settings_screen(Canvas* canvas, EEPROMApp* app) {
         uint8_t y = 18 + (i * 11);
 
         if(app->settings_cursor == ci) {
-            canvas_draw_box(canvas, 0, y - 3, 118, 14);
+            canvas_draw_box(canvas, 0, y - 3, 118, 10);
             canvas_set_color(canvas, ColorWhite);
         } else {
             canvas_set_color(canvas, ColorBlack);
@@ -570,6 +619,10 @@ static void draw_settings_screen(Canvas* canvas, EEPROMApp* app) {
                 canvas, 113, y - 1, AlignRight, AlignTop, chip_types[app->chip_type]);
             break;
         }
+        case SettingsItem_I2CScanner:
+            canvas_draw_str(canvas, 5, y + 5, "I2C Scanner");
+            canvas_draw_str_aligned(canvas, 113, y - 1, AlignRight, AlignTop, ">");
+            break;
         default:
             break;
         }
@@ -581,12 +634,184 @@ static void draw_settings_screen(Canvas* canvas, EEPROMApp* app) {
     elements_button_center(canvas, "OK");
 }
 
+// I2C Scanner screen
+static void draw_i2c_scanner_screen(Canvas* canvas, EEPROMApp* app) {
+    canvas_clear(canvas);
+
+    canvas_set_font(canvas, FontPrimary);
+    canvas_draw_str_aligned(canvas, 64, 2, AlignCenter, AlignTop, "I2C Scanner");
+
+    canvas_set_font(canvas, FontSecondary);
+
+    // Show device count
+    char count_str[32];
+    snprintf(count_str, sizeof(count_str), "Found: %d device(s)", app->i2c_device_count);
+    canvas_draw_str_aligned(canvas, 64, 14, AlignCenter, AlignTop, count_str);
+
+    // Display found devices in grid format (2 columns, centered)
+    // Use FontPrimary for better readability
+    canvas_set_font(canvas, FontPrimary);
+
+    uint8_t row = 0;
+    uint8_t col = 0;
+    uint8_t devices_shown = 0;
+    const uint8_t max_display = 8; // Show max 8 devices (4 rows x 2 cols)
+    const uint8_t col_width = 60; // Wide spacing to prevent overlap
+    const uint8_t row_height = 11; // Space between rows
+    const uint8_t start_x = 4; // Center the grid (128 - 2*60)/2
+    const uint8_t start_y = 28;
+
+    for(uint8_t addr = 0x08; addr < 0x78 && devices_shown < max_display; addr++) {
+        if(app->i2c_devices[addr]) {
+            char addr_str[8];
+            snprintf(addr_str, sizeof(addr_str), "0x%02X", addr);
+
+            uint8_t x = start_x + (col * col_width);
+            uint8_t y = start_y + (row * row_height);
+
+            canvas_draw_str(canvas, x, y, addr_str);
+
+            col++;
+            if(col >= 2) {
+                col = 0;
+                row++;
+            }
+            devices_shown++;
+        }
+    }
+
+    // Show "..." if more devices than can be displayed
+    if(app->i2c_device_count > max_display) {
+        canvas_set_font(canvas, FontSecondary);
+        canvas_draw_str_aligned(canvas, 64, 58, AlignCenter, AlignTop, "...");
+    }
+
+    elements_button_left(canvas, "Back");
+}
+
 // Confirmation dialog for loading file to EEPROM
 static void draw_confirm_load_screen(Canvas* canvas, EEPROMApp* app) {
     canvas_clear(canvas);
 
+    // Process async write/verify step if needed
+    if(app->writing || app->verifying) {
+        process_write_step(app);
+    }
+
     canvas_set_font(canvas, FontPrimary);
-    canvas_draw_str_aligned(canvas, 64, 2, AlignCenter, AlignTop, "Load to EEPROM?");
+
+    // If writing, show write progress
+    if(app->writing) {
+        canvas_draw_str_aligned(canvas, 64, 2, AlignCenter, AlignTop, "Loading to EEPROM");
+
+        canvas_set_font(canvas, FontSecondary);
+        canvas_draw_str_aligned(canvas, 64, 15, AlignCenter, AlignTop, "Stage 1/2: Writing...");
+
+        // Progress bar (same style as Read screen)
+        canvas_draw_frame(canvas, 12, 28, 100, 7);
+        uint8_t fill_width = 0;
+        if(app->write_total_bytes_async > 0) {
+            fill_width = (app->progress_value * 98) / app->write_total_bytes_async;
+        }
+        if(fill_width > 0) {
+            canvas_draw_box(canvas, 13, 29, fill_width, 5);
+        }
+
+        // Percentage
+        uint8_t percent = 0;
+        if(app->write_total_bytes_async > 0) {
+            percent = (app->progress_value * 100) / app->write_total_bytes_async;
+        }
+        char progress_str[16];
+        snprintf(progress_str, sizeof(progress_str), "%u%%", percent);
+        canvas_draw_str_aligned(canvas, 64, 46, AlignCenter, AlignTop, progress_str);
+    } else if(app->verifying) {
+        canvas_draw_str_aligned(canvas, 64, 2, AlignCenter, AlignTop, "Loading to EEPROM");
+
+        canvas_set_font(canvas, FontSecondary);
+        canvas_draw_str_aligned(canvas, 64, 15, AlignCenter, AlignTop, "Stage 2/2: Verifying...");
+
+        // Progress bar (same style as Read screen)
+        canvas_draw_frame(canvas, 12, 28, 100, 7);
+        uint8_t fill_width = 0;
+        if(app->verify_total_bytes > 0) {
+            fill_width = (app->progress_value * 98) / app->verify_total_bytes;
+        }
+        if(fill_width > 0) {
+            canvas_draw_box(canvas, 13, 29, fill_width, 5);
+        }
+
+        // Percentage
+        uint8_t percent = 0;
+        if(app->verify_total_bytes > 0) {
+            percent = (app->progress_value * 100) / app->verify_total_bytes;
+        }
+        char progress_str[16];
+        snprintf(progress_str, sizeof(progress_str), "%u%%", percent);
+        canvas_draw_str_aligned(canvas, 64, 46, AlignCenter, AlignTop, progress_str);
+    } else if(app->show_message) {
+        // Show completion message after write+verify
+        if(app->operation_success) {
+            canvas_draw_str_aligned(canvas, 64, 2, AlignCenter, AlignTop, "Load Complete");
+            canvas_set_font(canvas, FontSecondary);
+            canvas_draw_str_aligned(canvas, 64, 20, AlignCenter, AlignTop, "Stage 1: Write OK");
+            canvas_draw_str_aligned(canvas, 64, 30, AlignCenter, AlignTop, "Stage 2: Verify OK");
+            canvas_set_font(canvas, FontPrimary);
+            canvas_draw_str_aligned(canvas, 64, 45, AlignCenter, AlignTop, "SUCCESS");
+        } else {
+            canvas_draw_str_aligned(canvas, 64, 2, AlignCenter, AlignTop, "Load Failed");
+            canvas_set_font(canvas, FontSecondary);
+            canvas_draw_str_aligned(canvas, 64, 25, AlignCenter, AlignTop, app->message_text);
+        }
+
+        elements_button_center(canvas, "OK");
+    } else {
+        // Show confirmation dialog
+        canvas_draw_str_aligned(canvas, 64, 2, AlignCenter, AlignTop, "Load to EEPROM?");
+
+        canvas_set_font(canvas, FontSecondary);
+
+        // Show filename
+        char* filename = strrchr(app->file_path, '/');
+        if(filename)
+            filename++;
+        else
+            filename = app->file_path;
+
+        char display_name[32];
+        strncpy(display_name, filename, sizeof(display_name) - 1);
+        display_name[sizeof(display_name) - 1] = '\0';
+
+        canvas_draw_str_aligned(canvas, 64, 20, AlignCenter, AlignTop, "File:");
+        canvas_draw_str_aligned(canvas, 64, 30, AlignCenter, AlignTop, display_name);
+
+        // Show Yes/No buttons
+        if(app->confirm_load_yes) {
+            // YES selected
+            canvas_draw_box(canvas, 20, 42, 35, 11);
+            canvas_set_color(canvas, ColorWhite);
+            canvas_draw_str(canvas, 30, 50, "YES");
+            canvas_set_color(canvas, ColorBlack);
+            canvas_draw_str(canvas, 78, 50, "NO");
+        } else {
+            // NO selected
+            canvas_draw_str(canvas, 30, 50, "YES");
+            canvas_draw_box(canvas, 72, 42, 35, 11);
+            canvas_set_color(canvas, ColorWhite);
+            canvas_draw_str(canvas, 80, 50, "NO");
+        }
+
+        canvas_set_color(canvas, ColorBlack);
+        elements_button_center(canvas, "OK");
+    }
+}
+
+// Delete confirmation screen
+static void draw_confirm_delete_screen(Canvas* canvas, EEPROMApp* app) {
+    canvas_clear(canvas);
+
+    canvas_set_font(canvas, FontPrimary);
+    canvas_draw_str_aligned(canvas, 64, 2, AlignCenter, AlignTop, "Delete File?");
 
     canvas_set_font(canvas, FontSecondary);
 
@@ -605,7 +830,7 @@ static void draw_confirm_load_screen(Canvas* canvas, EEPROMApp* app) {
     canvas_draw_str_aligned(canvas, 64, 30, AlignCenter, AlignTop, display_name);
 
     // Show Yes/No buttons
-    if(app->confirm_load_yes) {
+    if(app->confirm_delete_yes) {
         // YES selected
         canvas_draw_box(canvas, 20, 42, 35, 11);
         canvas_set_color(canvas, ColorWhite);
@@ -646,6 +871,9 @@ static void eeprom_draw_callback(Canvas* canvas, void* context) {
     furi_assert(context);
     EEPROMApp* app = static_cast<EEPROMApp*>(context);
 
+    // Increment scroll counter for animated text scrolling
+    app->scroll_counter++;
+
     switch(app->current_state) {
     case AppState_Main:
         draw_main_screen(canvas, app);
@@ -668,11 +896,17 @@ static void eeprom_draw_callback(Canvas* canvas, void* context) {
     case AppState_Delete:
         draw_load_file_screen(canvas, app); // Reuse load file screen for delete
         break;
+    case AppState_ConfirmDelete:
+        draw_confirm_delete_screen(canvas, app);
+        break;
     case AppState_Erase:
         draw_erase_screen(canvas, app);
         break;
     case AppState_Settings:
         draw_settings_screen(canvas, app);
+        break;
+    case AppState_I2CScanner:
+        draw_i2c_scanner_screen(canvas, app);
         break;
     case AppState_About:
         draw_about_screen(canvas, app);
@@ -715,9 +949,6 @@ static void eeprom_input_callback(InputEvent* input_event, void* context) {
                     app->browsing_files = true;
                     app->file_cursor = 0;
                     break;
-                case MainItem_SaveFile:
-                    app->current_state = AppState_SaveFile;
-                    break;
                 case MainItem_Delete:
                     app->current_state = AppState_Delete;
                     app->browsing_files = true;
@@ -748,9 +979,52 @@ static void eeprom_input_callback(InputEvent* input_event, void* context) {
             } else if(input_event->key == InputKeyDown) {
                 if(app->current_address < 252) app->current_address += 4;
             } else if(input_event->key == InputKeyOk) {
-                read_memory_range(app);
+                if(app->read_completed) {
+                    // Data has been read, save immediately with auto-generated filename
+                    ensure_app_directory(app);
+                    char filename[64];
+                    generate_filename(app, filename, sizeof(filename));
+
+                    // Build full path
+                    snprintf(
+                        app->save_path,
+                        sizeof(app->save_path),
+                        "%s/%s.bin",
+                        EEPROM_APP_DIR,
+                        filename);
+
+                    // Save file
+                    Storage* storage = static_cast<Storage*>(furi_record_open(RECORD_STORAGE));
+                    File* file = storage_file_alloc(storage);
+
+                    bool success =
+                        storage_file_open(file, app->save_path, FSAM_WRITE, FSOM_CREATE_ALWAYS);
+
+                    if(success) {
+                        success = (storage_file_write(file, app->memory_data, 255) == 255);
+
+                        if(success) {
+                            show_message(app, "File saved!", true);
+                        } else {
+                            show_message(app, "Write error!", false);
+                        }
+                    } else {
+                        show_message(app, "Cannot create file!", false);
+                    }
+
+                    storage_file_close(file);
+                    storage_file_free(file);
+                    furi_record_close(RECORD_STORAGE);
+
+                    app->save_path[0] = '\0';
+                    app->read_completed = false;
+                } else {
+                    // Start read operation
+                    read_memory_range(app);
+                }
             } else if(input_event->key == InputKeyBack) {
                 app->current_state = AppState_Main;
+                app->read_completed = false; // Reset flag when leaving
             }
             break;
 
@@ -840,6 +1114,11 @@ static void eeprom_input_callback(InputEvent* input_event, void* context) {
                         if(app->file_loaded) {
                             app->current_state = AppState_ConfirmLoad;
                             app->confirm_load_yes = false; // Default to NO for safety
+                            // Reset states to ensure clean screen
+                            app->writing = false;
+                            app->verifying = false;
+                            app->show_message = false;
+                            app->show_progress = false;
                         }
                     }
                 } else if(input_event->key == InputKeyBack) {
@@ -875,27 +1154,72 @@ static void eeprom_input_callback(InputEvent* input_event, void* context) {
             break;
 
         case AppState_ConfirmLoad:
-            if(input_event->key == InputKeyLeft) {
-                app->confirm_load_yes = true;
-            } else if(input_event->key == InputKeyRight) {
-                app->confirm_load_yes = false;
-            } else if(input_event->key == InputKeyOk) {
-                if(app->confirm_load_yes) {
-                    // User confirmed YES - write file data to EEPROM
-                    bool success = app->eeprom->writeBytes(0, app->file_data, app->file_size);
-                    if(success) {
-                        show_message(app, "File written to EEPROM!", true);
-                        // Copy file data to memory display
-                        memcpy(app->memory_data, app->file_data, sizeof(app->memory_data));
-                    } else {
-                        show_message(app, "Write failed!", false);
-                    }
+            if(app->show_message) {
+                // Showing completion message - allow dismissal
+                if(input_event->key == InputKeyOk || input_event->key == InputKeyBack) {
+                    app->show_message = false;
+                    app->current_state = AppState_Main;
                 }
-                // Return to main menu regardless of choice
-                app->current_state = AppState_Main;
+            } else if(app->writing || app->verifying) {
+                // Writing/verifying in progress - no input allowed (operation continues)
+                // Could add Back key to cancel if needed
+            } else {
+                // Normal confirmation flow
+                if(input_event->key == InputKeyLeft) {
+                    app->confirm_load_yes = true;
+                } else if(input_event->key == InputKeyRight) {
+                    app->confirm_load_yes = false;
+                } else if(input_event->key == InputKeyOk) {
+                    if(app->confirm_load_yes) {
+                        // User confirmed YES - start async write to EEPROM with verification
+                        app->writing = true;
+                        app->write_current_addr_async = 0;
+                        app->write_total_bytes_async = app->file_size;
+                        app->write_last_update = furi_get_tick();
+                        app->show_progress = true;
+                        app->progress_value = 0;
+                        app->verifying = false;
+                        app->message_text[0] = '\0';
+                        app->show_message = false;
+                        // Stay in ConfirmLoad state to show progress
+                    } else {
+                        // User selected NO - return to main menu
+                        app->current_state = AppState_Main;
+                    }
+                } else if(input_event->key == InputKeyBack) {
+                    // Cancel - return to main menu without writing
+                    app->current_state = AppState_Main;
+                }
+            }
+            break;
+
+        case AppState_ConfirmDelete:
+            if(input_event->key == InputKeyLeft) {
+                app->confirm_delete_yes = true;
+            } else if(input_event->key == InputKeyRight) {
+                app->confirm_delete_yes = false;
+            } else if(input_event->key == InputKeyOk) {
+                if(app->confirm_delete_yes) {
+                    // User confirmed YES - delete the file
+                    Storage* storage = static_cast<Storage*>(furi_record_open(RECORD_STORAGE));
+                    if(storage_simply_remove(storage, app->file_path)) {
+                        show_message(app, "File deleted!", true);
+                    } else {
+                        show_message(app, "Delete failed!", false);
+                    }
+                    furi_record_close(RECORD_STORAGE);
+
+                    // Refresh file list and return to delete screen
+                    free_file_list(app);
+                    scan_directory(app, app->current_directory);
+                    app->current_state = AppState_Delete;
+                } else {
+                    // User selected NO - return to delete screen
+                    app->current_state = AppState_Delete;
+                }
             } else if(input_event->key == InputKeyBack) {
-                // Cancel - return to main menu without writing
-                app->current_state = AppState_Main;
+                // Cancel - return to delete screen
+                app->current_state = AppState_Delete;
             }
             break;
 
@@ -908,16 +1232,12 @@ static void eeprom_input_callback(InputEvent* input_event, void* context) {
                         app->file_cursor++;
                 } else if(input_event->key == InputKeyOk) {
                     if(app->file_count > 0 && app->file_cursor < app->file_count) {
+                        // Store the file path and show confirmation dialog
                         char* full_path = app->file_list[app->file_cursor];
-                        Storage* storage = static_cast<Storage*>(furi_record_open(RECORD_STORAGE));
-                        if(storage_simply_remove(storage, full_path)) {
-                            show_message(app, "File deleted!", true);
-                        }
-                        furi_record_close(RECORD_STORAGE);
-
-                        // Refresh file list
-                        free_file_list(app);
-                        scan_directory(app, app->current_directory);
+                        strncpy(app->file_path, full_path, sizeof(app->file_path) - 1);
+                        app->file_path[sizeof(app->file_path) - 1] = '\0';
+                        app->confirm_delete_yes = false; // Default to NO for safety
+                        app->current_state = AppState_ConfirmDelete;
                     }
                 } else if(input_event->key == InputKeyBack) {
                     app->browsing_files = false;
@@ -1017,7 +1337,7 @@ static void eeprom_input_callback(InputEvent* input_event, void* context) {
                     int result = snprintf(
                         full_path,
                         sizeof(full_path),
-                        "%s/%s",
+                        "%s/%s.bin",
                         app->current_directory,
                         auto_filename);
                     if(result >= 0 && (size_t)result < sizeof(full_path)) {
@@ -1063,14 +1383,26 @@ static void eeprom_input_callback(InputEvent* input_event, void* context) {
                     // TODO: Reinitialize EEPROM with new chip type
                 }
             } else if(input_event->key == InputKeyOk) {
-                // Test connection
-                app->eeprom_connected = app->eeprom->isAvailable();
-                show_message(
-                    app,
-                    app->eeprom_connected ? "Connected!" : "Not Connected",
-                    app->eeprom_connected);
+                if(app->settings_cursor == SettingsItem_I2CScanner) {
+                    // Launch I2C Scanner
+                    scan_i2c_bus(app);
+                    app->current_state = AppState_I2CScanner;
+                } else {
+                    // Test connection
+                    app->eeprom_connected = app->eeprom->isAvailable();
+                    show_message(
+                        app,
+                        app->eeprom_connected ? "Connected!" : "Not Connected",
+                        app->eeprom_connected);
+                }
             } else if(input_event->key == InputKeyBack) {
                 app->current_state = AppState_Main;
+            }
+            break;
+
+        case AppState_I2CScanner:
+            if(input_event->key == InputKeyOk || input_event->key == InputKeyBack) {
+                app->current_state = AppState_Settings;
             }
             break;
 
@@ -1112,14 +1444,13 @@ static void generate_filename(EEPROMApp* app, char* buffer, size_t buffer_size) 
     snprintf(
         buffer,
         buffer_size,
-        "%s_%04d%02d%02d_%02d%02d%02d.bin",
+        "%s_%04d-%02d-%02d_%02d-%02d",
         chip_name,
         datetime.year,
         datetime.month,
         datetime.day,
         datetime.hour,
-        datetime.minute,
-        datetime.second);
+        datetime.minute);
 }
 
 // Process async erase step - called from draw callback
@@ -1177,7 +1508,8 @@ static void process_read_step(EEPROMApp* app) {
             // Read completed
             app->reading = false;
             app->show_progress = false;
-            show_message(app, "", true);
+            app->read_completed = true; // Mark read as completed
+            show_message(app, "Read complete! Press OK to save.", true);
             return;
         }
 
@@ -1206,6 +1538,7 @@ static void process_read_step(EEPROMApp* app) {
 static bool read_memory_range(EEPROMApp* app) {
     // Start async read of entire EEPROM
     app->reading = true;
+    app->read_completed = false;
     app->read_current_addr = 0;
     app->read_last_update = furi_get_tick();
     app->show_progress = true;
@@ -1213,6 +1546,99 @@ static bool read_memory_range(EEPROMApp* app) {
     app->read_total_bytes = 255; // Read entire EEPROM
 
     return true;
+}
+
+// Async write step with verification
+static void process_write_step(EEPROMApp* app) {
+    uint32_t current_time = furi_get_tick();
+
+    // If verifying, process verification step
+    if(app->verifying) {
+        if(current_time - app->verify_last_update >= 30) {
+            if(app->verify_current_addr >= app->verify_total_bytes) {
+                // Verification read completed - now compare
+                bool verified = true;
+                for(uint8_t i = 0; i < app->verify_total_bytes; i++) {
+                    if(app->verify_buffer[i] != app->file_data[i]) {
+                        verified = false;
+                        break;
+                    }
+                }
+
+                if(verified) {
+                    show_message(app, "Success!", true);
+                    // Copy file data to memory display
+                    memcpy(app->memory_data, app->file_data, sizeof(app->memory_data));
+                } else {
+                    show_message(app, "Verify Failed!", false);
+                }
+
+                app->verifying = false;
+                app->writing = false;
+                app->show_progress = false;
+                return;
+            }
+
+            // Read one verification chunk (16 bytes at a time)
+            uint8_t chunk_size = (app->verify_current_addr + 16 <= app->verify_total_bytes) ?
+                                     16 :
+                                     (app->verify_total_bytes - app->verify_current_addr);
+
+            bool success = app->eeprom->readBytes(
+                app->verify_current_addr,
+                &app->verify_buffer[app->verify_current_addr],
+                chunk_size);
+
+            if(!success) {
+                app->verifying = false;
+                app->writing = false;
+                app->show_progress = false;
+                show_message(app, "Verify read failed!", false);
+                return;
+            }
+
+            // Update verify progress
+            app->verify_current_addr += chunk_size;
+            app->progress_value = app->verify_current_addr;
+            app->verify_last_update = current_time;
+        }
+        return;
+    }
+
+    // Process write step
+    if(current_time - app->write_last_update >= 30) {
+        if(app->write_current_addr_async >= app->write_total_bytes_async) {
+            // Write completed - start verification
+            app->writing = false;
+            app->verifying = true;
+            app->verify_current_addr = 0;
+            app->verify_total_bytes = app->write_total_bytes_async;
+            app->verify_last_update = furi_get_tick();
+            app->progress_value = 0;
+            return;
+        }
+
+        // Write one chunk (4 bytes at a time for EEPROM page write)
+        uint8_t chunk_size = (app->write_current_addr_async + 4 <= app->write_total_bytes_async) ?
+                                 4 :
+                                 (app->write_total_bytes_async - app->write_current_addr_async);
+
+        bool success = app->eeprom->writeBytes(
+            app->write_current_addr_async,
+            &app->file_data[app->write_current_addr_async],
+            chunk_size);
+        if(!success) {
+            app->writing = false;
+            app->show_progress = false;
+            show_message(app, "Write Failed!", false);
+            return;
+        }
+
+        // Update progress
+        app->write_current_addr_async += chunk_size;
+        app->progress_value = app->write_current_addr_async;
+        app->write_last_update = current_time;
+    }
 }
 
 // Write memory data
@@ -1244,6 +1670,34 @@ static bool erase_memory_range(EEPROMApp* app, uint8_t start_addr, uint8_t lengt
     app->progress_value = 0;
 
     return true;
+}
+
+// Scan I2C bus for devices
+static void scan_i2c_bus(EEPROMApp* app) {
+    app->i2c_device_count = 0;
+
+    // Clear previous results
+    for(uint8_t i = 0; i < 128; i++) {
+        app->i2c_devices[i] = false;
+    }
+
+    // Scan all possible I2C addresses (7-bit: 0x00-0x7F)
+    for(uint8_t addr = 0x08; addr < 0x78; addr++) {
+        // Try to communicate with device at this address
+        furi_hal_i2c_acquire(&furi_hal_i2c_handle_external);
+
+        bool device_found = furi_hal_i2c_is_device_ready(
+            &furi_hal_i2c_handle_external,
+            addr << 1, // Convert to 8-bit address
+            10);
+
+        furi_hal_i2c_release(&furi_hal_i2c_handle_external);
+
+        if(device_found) {
+            app->i2c_devices[addr] = true;
+            app->i2c_device_count++;
+        }
+    }
 }
 
 // Save memory to file
@@ -1437,6 +1891,7 @@ static EEPROMApp* eeprom_app_alloc() {
     app->view_mode = ViewMode_Hex;
     app->dark_mode = false;
     app->show_message = false;
+    app->scroll_counter = 0;
 
     // Initialize progress
     app->show_progress = false;
@@ -1453,6 +1908,19 @@ static EEPROMApp* eeprom_app_alloc() {
     app->read_current_addr = 0;
     app->read_last_update = 0;
     app->read_total_bytes = 0;
+    app->read_completed = false;
+
+    // Initialize async write
+    app->writing = false;
+    app->write_current_addr_async = 0;
+    app->write_last_update = 0;
+    app->write_total_bytes_async = 0;
+
+    // Initialize async verify
+    app->verifying = false;
+    app->verify_current_addr = 0;
+    app->verify_last_update = 0;
+    app->verify_total_bytes = 0;
 
     // Initialize file operations
     app->file_path[0] = '\0';
@@ -1461,6 +1929,7 @@ static EEPROMApp* eeprom_app_alloc() {
 
     // Initialize confirmation dialog
     app->confirm_load_yes = false;
+    app->confirm_delete_yes = false;
 
     // Initialize save operations
     app->save_mode = false;
@@ -1492,12 +1961,20 @@ static EEPROMApp* eeprom_app_alloc() {
         app->memory_data[i] = 0xFF;
     }
 
+    // Initialize I2C Scanner
+    app->i2c_device_count = 0;
+    app->scanning_i2c = false;
+    for(uint8_t i = 0; i < 128; i++) {
+        app->i2c_devices[i] = false;
+    }
+
     return app;
 }
 
 // Free application
 static void eeprom_app_free(EEPROMApp* app) {
     furi_assert(app);
+
     gui_remove_view_port(app->gui, app->view_port);
     view_port_free(app->view_port);
     furi_record_close(RECORD_GUI);
