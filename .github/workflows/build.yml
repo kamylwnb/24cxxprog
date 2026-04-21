@@ -20,18 +20,10 @@ jobs:
         with:
           name: ${{ github.event.repository.name }}-${{ steps.build-app.outputs.suffix }}
           path: ${{ steps.build-app.outputs.fap-artifacts }}
-      # ── LINT / AUTO-FORMAT (runs when commit message contains [lint]) ───────
-      - name: Auto-format with clang-format
-        if: contains(github.event.head_commit.message, '[lint]')
-        run: |
-          sudo apt-get install -y --no-install-recommends clang-format
-          clang-format -i i2c_24c02.hpp i2c_24c02.cpp i2c_24c02_app.cpp
-          if ! git diff --quiet; then
-            git config user.name  "github-actions[bot]"
-            git config user.email "github-actions[bot]@users.noreply.github.com"
-            git add i2c_24c02.hpp i2c_24c02.cpp i2c_24c02_app.cpp
-            git commit -m "style: auto clang-format [skip ci]"
-            git push
-          else
-            echo "No formatting changes needed."
-          fi
+      # You can remove this step if you don't want to check source code formatting
+      - name: Lint sources
+        uses: flipperdevices/flipperzero-ufbt-action@v0.1
+        with:
+          # skip SDK setup, we already did it in previous step
+          skip-setup: true
+          task: lint
