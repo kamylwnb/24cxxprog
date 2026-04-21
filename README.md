@@ -100,8 +100,8 @@ Standard I2C pinout for Flipper Zero GPIO:
 ```txt
 24Cxx EEPROM Module      Flipper Zero GPIO
 ─────────────────        ─────────────────
-SDA (Pin 5)       ───→   GPIO_SDA (Pin 16)
-SCL (Pin 6)       ───→   GPIO_SCL (Pin 15)
+SDA (Pin 5)       ───→   GPIO_SDA (Pin 15)
+SCL (Pin 6)       ───→   GPIO_SCL (Pin 16)
 GND (Pin 4)       ───→   GND (Pin 8)
 VCC (Pin 8)       ───→   3.3V (Pin 9)
 
