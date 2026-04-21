@@ -71,7 +71,7 @@ void drawScreen_1(Canvas* canvas) {
     canvas_draw_str(canvas, 86, 22, "24cXX ");
 
     // Layer 3
-    canvas_draw_str(canvas, 77, 10, "Dr.Mosfet ");
+    canvas_draw_str(canvas, 77, 10, "Fred Corp.");
 
     // Layer 4
     canvas_draw_str(canvas, 67, 34, "Programmer");
