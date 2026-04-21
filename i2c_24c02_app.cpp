@@ -1008,7 +1008,7 @@ static void draw_about_screen(Canvas* canvas, EEPROMApp* app) {
     canvas_draw_str_aligned(canvas, 64, 18, AlignCenter, AlignTop, "EEPROM Programmer");
     canvas_draw_str_aligned(canvas, 64, 28, AlignCenter, AlignTop, "24C01-24C512 (128B-64KB)");
     canvas_draw_str_aligned(canvas, 64, 38, AlignCenter, AlignTop, "I2C Memory Tool");
-    canvas_draw_str_aligned(canvas, 64, 50, AlignCenter, AlignTop, "Author: Fred Corp.");
+    canvas_draw_str_aligned(canvas, 64, 50, AlignCenter, AlignTop, "Author: @Dr.Mosfet");
 
     elements_button_left(canvas, "Back");
 }

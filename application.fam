@@ -16,7 +16,7 @@ App(
     order=21,
     fap_icon="icons/ikon.png",
     fap_category="GPIO",
-    fap_author="Fred Corp.",
+    fap_author="@Dr.Mosfet",
     fap_version="2.1",
     fap_description="EEPROM 24Cxx programmer via I2C with read, write, erase and dump/restore options.",
 )

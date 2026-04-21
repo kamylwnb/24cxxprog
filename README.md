@@ -24,7 +24,7 @@
     </table>
 </div>
 
-[![FAP : Build and lint](https://github.com/fred-corp/24cxxprog/actions/workflows/build.yml/badge.svg)](https://github.com/fred-corp/24cxxprog/actions/workflows/build.yml)
+[![FAP : Build and lint](https://github.com/kamylwnb/24cxxprog/actions/workflows/build.yml/badge.svg)](https://github.com/kamylwnb/24cxxprog/actions/workflows/build.yml)
 
 ---
 
