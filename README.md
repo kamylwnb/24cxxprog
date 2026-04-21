@@ -8,21 +8,23 @@
             <td style="border:none; padding:10px;">
                 <img src="screenshots/1.png" alt="Main Menu - Operations" style="width:100%;">
                 <br>
-                <em>Menu główne z operacjami (Odczyt, Zapis, Kasowanie)</em>
+                <em>Splashscreen</em>
             </td>
             <td style="border:none; padding:10px;">
                 <img src="screenshots/2.png" alt="Configuration Menu" style="width:100%;">
                 <br>
-                <em>Menu konfiguracji (Adres I2C, Rozmiar pamięci)</em>
+                <em>Main menu</em>
             </td>
             <td style="border:none; padding:10px;">
                 <img src="screenshots/3.png" alt="Data Display - EEPROM Contents" style="width:100%;">
                 <br>
-                <em>Wyświetlanie zawartości EEPROM (Dane heksadecymalne)</em>
+                <em>Displaying EEPROM Contents (Hex Data)</em>
             </td>
         </tr>
     </table>
 </div>
+
+[![FAP : Build and lint](https://github.com/fred-corp/24cxxprog/actions/workflows/build.yml/badge.svg)](https://github.com/fred-corp/24cxxprog/actions/workflows/build.yml)
 
 ---
 
